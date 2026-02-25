@@ -1,3 +1,77 @@
+import os
+import cv2
+import numpy as np
+from depth_engine import DepthEngine
+from lens_sim import apply_variable_blur
+from evaluator import pick_hero_frame
+
+# Global variable to track the focus depth from user clicks
+current_focus_depth = 255
+
+def mouse_callback(event, x, y, flags, param):
+    """Handles the user clicking on the image to select a focus point."""
+    global current_focus_depth
+    if event == cv2.EVENT_LBUTTONDOWN:
+        depth_map = param['depth_map']
+        # Look up the depth value at the specific (x, y) coordinate clicked
+        current_focus_depth = depth_map[y, x]
+        print(f"Focus set to depth: {current_focus_depth} (Coordinate: {x}, {y})")
+
+def run_lsdr_app(burst_folder):
+    global current_focus_depth
+    
+    # 1. Load 4K Burst
+    print("Loading 4K burst images...")
+    files = sorted([os.path.join(burst_folder, f) for f in os.listdir(burst_folder) 
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    images = [cv2.imread(f) for f in files]
+    
+    if not images:
+        print("No images found in the specified folder.")
+        return
+
+    # 2. Automatically Select the Sharpest 'Hero' Frame
+    hero_idx = pick_hero_frame(images)
+    hero_frame = images[hero_idx]
+    print(f"Hero frame selected: {files[hero_idx]}")
+
+    # 3. Generate the High-Res Depth Map
+    # This uses the Transformer-based Depth-Anything-V2
+    engine = DepthEngine()
+    depth_map = engine.generate_map(hero_frame)
+
+    # 4. Interactive UI Setup
+    window_name = "LSDR Interactive Focus - Click to Focus"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1280, 720) # Scaled for display
+    cv2.setMouseCallback(window_name, mouse_callback, {'depth_map': depth_map})
+
+    print("\n--- APP CONTROLS ---")
+    print("LEFT CLICK: Set focus at that depth")
+    print("PRESS 'S' : Save current view at 100% 4K Quality")
+    print("PRESS 'Q' : Quit application")
+
+    while True:
+        # 5. Apply Physically-Accurate Lens Blur
+        # max_bokeh=20 simulates a fast f/1.4 or f/1.8 lens
+        display_img = apply_variable_blur(hero_frame, depth_map, 
+                                          focus_depth=current_focus_depth, 
+                                          max_bokeh=20)
+
+        cv2.imshow(window_name, display_img)
+        
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('s'):
+            save_path = f"lsdr_focus_{current_focus_depth}.jpg"
+            cv2.imwrite(save_path, display_img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+            print(f"Saved 4K high-quality result to: {save_path}")
+        elif key == ord('q'):
+            break
+
+    cv2.destroyAllWindows()
+    
+    
+    
 import cv2
 import numpy as np
 from depth_engine import DepthEngine
@@ -73,8 +147,8 @@ def run_fast_lsdr(burst_folder):
             break
 
     cv2.destroyAllWindows()
-    
+
 if __name__ == "__main__":
     # Ensure this points to your specific folder
-    MY_BURST_PATH = "/Users/weiyuankong/Projects/zero_waste_photo/sample"
+    MY_BURST_PATH = "/Users/weiyuankong/Downloads/Photos-3-001 (1)"
     run_fast_lsdr(MY_BURST_PATH)
