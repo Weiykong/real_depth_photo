@@ -4,7 +4,7 @@ import numpy as np
 from depth_engine import DepthEngine
 from lens_sim import apply_variable_blur
 from evaluator import pick_hero_frame
-from refiner import DepthRefiner, refined_blend
+from refiner import DepthRefiner
 
 # Global variable to track the focus depth from user clicks
 current_focus_depth = 255
