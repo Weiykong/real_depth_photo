@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flattened single-layer icon to prevent parallax shift during OS animations -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="26dp" />
+            <gradient
+                android:angle="315"
+                android:endColor="#100D09"
+                android:startColor="#241700" />
+            <size
+                android:width="108dp"
+                android:height="108dp" />
+        </shape>
+    </item>
+
+    <!-- Unified group to prevent relative movement -->
+    <item android:gravity="center">
+        <layer-list>
+            <!-- Outer Ring -->
+            <item android:top="18dp" android:bottom="18dp" android:left="18dp" android:right="18dp">
+                <shape android:shape="oval">
+                    <stroke android:width="2dp" android:color="#FFF1BD" />
+                </shape>
+            </item>
+            
+            <!-- Main Lens Body -->
+            <item android:top="22dp" android:bottom="22dp" android:left="22dp" android:right="22dp">
+                <shape android:shape="oval">
+                    <gradient
+                        android:centerColor="#FFCF6E"
+                        android:endColor="#995200"
+                        android:startColor="#FFF0B2"
+                        android:type="radial"
+                        android:gradientRadius="32dp" />
+                </shape>
+            </item>
+
+            <!-- Inner Lens Pupil -->
+            <item android:top="34dp" android:bottom="34dp" android:left="34dp" android:right="34dp">
+                <shape android:shape="oval">
+                    <solid android:color="#16120D" />
+                </shape>
+            </item>
+
+            <!-- Rotated Element Locked to Layer -->
+            <item android:top="46dp" android:bottom="46dp" android:left="32dp" android:right="32dp">
+                <rotate android:fromDegrees="-28" android:pivotX="50%" android:pivotY="50%">
+                    <shape android:shape="rectangle">
+                        <corners android:radius="4dp" />
+                        <stroke android:width="1.5dp" android:color="#CCFFD27A" />
+                        <solid android:color="@android:color/transparent" />
+                    </shape>
+                </rotate>
+            </item>
+        </layer-list>
+    </item>
+</layer-list>

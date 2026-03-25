@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# --- Android / Gradle ---
+.gradle/
+**/build/
+*.iml
+.idea/
+local.properties
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+gradle-app.setting
+.DS_Store
+
+# --- ML Models & Large Assets ---
+*.tflite
+*.pt
+*.pth
+*.onnx
+checkpoints/
+/android_ui_prototype/app/src/main/assets/Depth-Anything-V2.tflite
+
+# --- Project Specific ---
+ultra_depth_server/.venv/
+*.jpg
+*.jpeg
+*.png
+!/docs/assets/*.png
+!/docs/assets/*.jpg
+!/ultra_depth_server/test_depth.png
+!/zero_waste_lsdr_result.jpg
