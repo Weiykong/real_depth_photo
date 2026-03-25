@@ -13,7 +13,7 @@
 ### High-Resolution Scene Analysis
 | Original Photo | AI Depth Estimation (HD) | Final 4K GPU Render |
 |:---:|:---:|:---:|
-| ![Original](docs/assets/sample1_origin.png) | ![Depth](docs/assets/sample1_depthmap_HD.jpg| ![Final](docs/assets/RealDepth_1774379530066.jpg) |
+| ![Original](docs/assets/sample1_origin.png) | ![Depth](docs/assets/sample1_depthmap_HD.jpg)| ![Final](docs/assets/RealDepth_1774379530066.jpg) |
 
 > *Example showing a complex outdoor scene with multi-layered depth and realistic bokeh falloff.*
 
