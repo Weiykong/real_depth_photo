@@ -21,8 +21,8 @@ vec4 main(float2 coord) {
     float totalWeight = 1.0;
     float weightedDepth = raw;
     
-    const float radius = 2.0;
-    const float rangeSigma = 0.11;
+    const float radius = 3.0;
+    const float rangeSigma = 0.10;
     const float rangeSigmaSq = 2.0 * rangeSigma * rangeSigma;
     
     for (float dy = -radius; dy <= radius; dy += 1.0) {
@@ -69,6 +69,7 @@ vec4 main(float2 coord) {
 const val CONTOUR_MATTE_SHADER_SRC = """
 uniform shader image;
 uniform shader refinedDepthMap;
+uniform shader segMask;       // ML Kit portrait segmentation (0=bg, 1=person)
 uniform float2 resolution;
 uniform float focus;
 uniform float focusDeadZone;
@@ -77,6 +78,7 @@ uniform float edgeSoftness;
 uniform float edgeExpand;
 uniform float quality;
 uniform float refineStrength;
+uniform float hasSegMask;     // 1.0 if segmentation mask is available, 0.0 otherwise
 
 float getLuma(vec3 c) {
     return dot(c, vec3(0.299, 0.587, 0.114));
@@ -101,6 +103,9 @@ vec4 main(float2 coord) {
     float centerLuma = getLuma(centerColor);
     vec2 centerChroma = getChroma(centerColor);
 
+    // ── Segmentation mask: the hair/portrait prior ──────────────
+    float centerSeg = segMask.eval(coord).r;  // 0=background, 1=person
+
     float localAverage = centerRaw;
     float localCount = 1.0;
     float guidedSum = centerRaw * mix(1.15, 1.4, quality);
@@ -108,6 +113,7 @@ vec4 main(float2 coord) {
     float lumaEdge = 0.0;
     float chromaEdge = 0.0;
     float depthEdge = 0.0;
+    float segEdge = 0.0;
     float localForegroundMax = centerRaw;
     float localBackgroundMin = centerRaw;
 
@@ -121,6 +127,7 @@ vec4 main(float2 coord) {
             float sampleRaw = clamp(baseMatte(sampleDepth), 0.0, 1.0);
             float sampleLuma = getLuma(sampleColor);
             vec2 sampleChroma = getChroma(sampleColor);
+            float sampleSeg = segMask.eval(sampleCoord).r;
 
             float lumaDiff = abs(sampleLuma - centerLuma);
             float chromaDiff = length(sampleChroma - centerChroma);
@@ -129,6 +136,7 @@ vec4 main(float2 coord) {
             lumaEdge = max(lumaEdge, lumaDiff);
             chromaEdge = max(chromaEdge, chromaDiff);
             depthEdge = max(depthEdge, depthDiff);
+            segEdge = max(segEdge, abs(sampleSeg - centerSeg));
             localAverage += sampleRaw;
             localCount += 1.0;
             localForegroundMax = max(localForegroundMax, sampleRaw);
@@ -139,6 +147,14 @@ vec4 main(float2 coord) {
                 exp(-(lumaDiff * lumaDiff) / mix(0.018, 0.012, quality)) *
                 exp(-(chromaDiff * chromaDiff) / mix(0.028, 0.020, quality)) *
                 exp(-(depthDiff * depthDiff) / mix(0.016, 0.010, quality));
+
+            // When seg mask is available, also weight by seg similarity
+            // This prevents blur from crossing person/background boundaries
+            if (hasSegMask > 0.5) {
+                float segDiff = abs(sampleSeg - centerSeg);
+                guideWeight *= exp(-(segDiff * segDiff) / 0.08);
+            }
+
             guidedSum += sampleRaw * guideWeight;
             guidedWeight += guideWeight;
         }
@@ -151,6 +167,16 @@ vec4 main(float2 coord) {
     float stableBase = contourStrength < 0.12 ? centerRaw * 0.80 + localAverage * 0.20 : centerRaw;
     float refineAmount = mix(0.18, 1.0, refineStrength);
     float hairConfidence = contourStrength * transitionBand * quality * refineAmount;
+
+    // ── Seg-mask boosted hair confidence ────────────────────────
+    // When we're on a seg boundary (segEdge high) AND the seg says
+    // "this pixel IS person", boost hair confidence dramatically.
+    // This catches hair strands that depth misses entirely.
+    if (hasSegMask > 0.5) {
+        float segBoundary = smoothstep(0.08, 0.50, segEdge);
+        float segIsPerson = smoothstep(0.30, 0.65, centerSeg);
+        hairConfidence = max(hairConfidence, segBoundary * segIsPerson * quality * refineAmount * 0.85);
+    }
 
     float refinedTransition = stableBase;
     if (hairConfidence > 0.24) {
@@ -167,6 +193,25 @@ vec4 main(float2 coord) {
     float smoothed = mix(edgeProtected, guidedAverage, mix(0.08, 0.22, quality) * (1.0 - contourStrength) * (1.0 - refineStrength * 0.45));
     float alpha = clamp(smoothed + matteBoost, 0.0, 1.0);
 
+    // ── Final seg-mask fusion ──────────────────────────────────
+    // At person boundaries (hair), blend the depth-based alpha with
+    // the segmentation confidence. The seg mask is the "truth" for
+    // thin structures; depth is the "truth" for z-ordering.
+    if (hasSegMask > 0.5) {
+        // How much are we on a seg boundary?
+        float segBoundaryZone = smoothstep(0.03, 0.30, segEdge);
+        // In boundary zones, trust the seg mask for the alpha shape
+        // but keep depth-based alpha for the overall intensity
+        float segAlpha = smoothstep(0.10, 0.45, centerSeg);
+        // Blend: in boundary zones, seg dominates; away from boundaries, depth dominates
+        float fusionWeight = segBoundaryZone * refineAmount * 0.92;
+        alpha = mix(alpha, max(alpha, segAlpha), fusionWeight);
+        // Anti-halo: on person side near boundary, clamp alpha to prevent
+        // blurred background from bleeding into the foreground edge
+        float personNearEdge = segBoundaryZone * smoothstep(0.35, 0.65, centerSeg);
+        alpha = mix(alpha, max(alpha, 0.95), personNearEdge * refineAmount * 0.80);
+    }
+
     return vec4(alpha, alpha, alpha, 1.0);
 }
 """
@@ -176,16 +221,18 @@ const val BOKEH_SHADER_SRC = """
 uniform shader image;
 uniform shader refinedDepthMap;
 uniform shader contourMatte;
+uniform shader segMask;       // ML Kit portrait segmentation
 uniform float2 resolution;
 uniform float focus;
 uniform float focusDeadZone;
 uniform float falloffWidth;
 uniform float edgeExpand;
 uniform float maxBlurRadius;
-uniform int lensEffectType; 
+uniform int lensEffectType;
 uniform float highlightBoost;
 uniform float vignetteStrength;
 uniform float highResScale;
+uniform float hasSegMask;     // 1.0 if seg mask available
 
 const float GOLDEN_ANGLE = 2.39996323;
 
@@ -263,8 +310,16 @@ vec4 main(float2 coord) {
     vec3 sourceColor = image.eval(coord).rgb;
     float centerDepth = refinedDepthMap.eval(coord).r;
     float centerMatte = contourMatte.eval(coord).r;
+    float centerSeg = segMask.eval(coord).r;
     float centerCoC = getCoC(centerDepth);
-    float matteProtection = centerMatte * (1.0 - smoothstep(1.4, 8.5, centerCoC));
+    // Seg mask boosts matte protection on person boundaries (hair, glasses)
+    float segBoost = (hasSegMask > 0.5) ? smoothstep(0.25, 0.60, centerSeg) * 0.45 : 0.0;
+    float effectiveMatte = clamp(centerMatte + segBoost, 0.0, 1.0);
+    // CoC damping: reduce protection for far-away pixels, BUT preserve a
+    // minimum floor when seg mask confidently says "person" (anti-halo)
+    float cocDamping = 1.0 - smoothstep(1.4, 8.5, centerCoC);
+    float segFloor = (hasSegMask > 0.5) ? smoothstep(0.40, 0.70, centerSeg) * 0.55 : 0.0;
+    float matteProtection = effectiveMatte * max(cocDamping, segFloor);
     float blurGate = smoothstep(2.0, 18.0, centerCoC);
 
     if (centerCoC <= 0.2 || matteProtection >= 0.985) {
@@ -316,7 +371,8 @@ vec4 main(float2 coord) {
         vec3 sampleColor = vec3(image.eval(rCoord).r, image.eval(gCoord).g, image.eval(bCoord).b);
         float sampleDepth = refinedDepthMap.eval(gCoord).r;
         float sampleMatte = contourMatte.eval(gCoord).r;
-        
+        float sampleSeg = segMask.eval(gCoord).r;
+
         float weight = getLensWeight(r_norm, theta, lensEffectType);
         float depthDiff = sampleDepth - centerDepth;
         float sampleCoC = getCoC(sampleDepth);
@@ -334,6 +390,22 @@ vec4 main(float2 coord) {
         }
         if (matteProtection > 0.55 && sampleMatte + 0.14 < centerMatte) {
             weight *= 0.34;
+        }
+
+        // ── Seg-mask occlusion: hard boundary between person and background ──
+        // Reject samples that cross the person/background boundary in BOTH directions
+        // to prevent blur leaking across hair/skin edges (halo artifact).
+        if (hasSegMask > 0.5) {
+            float segDiff = abs(sampleSeg - centerSeg);
+            float segCrossing = smoothstep(0.12, 0.50, segDiff);
+            // Protect person edges: center=person, sample=background
+            float personSide = smoothstep(0.20, 0.55, centerSeg);
+            float personReject = segCrossing * personSide * 0.96;
+            // Protect background edges: center=background, sample=person
+            // (prevents blurred BG from pulling in sharp foreground)
+            float bgSide = smoothstep(0.20, 0.55, 1.0 - centerSeg);
+            float bgReject = segCrossing * bgSide * 0.90;
+            weight *= 1.0 - max(personReject, bgReject);
         }
 
         accumColor += applyHighlightBoost(sampleColor, highlightBoost, sampleCoC, r_norm, lensEffectType) * weight;

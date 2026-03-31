@@ -88,7 +88,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,6 +99,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -810,38 +813,102 @@ private fun BlurPreviewScreen(
                             }
                         }
                     )
+                    val isProUser by com.cinedepth.pro.ui.billing.ProUpgradeManager.isPro.collectAsState()
                     DropdownMenuItem(
-                        text = { Text("Original Resolution", color = AccentAmber) },
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Original Resolution", color = AccentAmber)
+                                if (!isProUser) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "▶ AD",
+                                        color = AccentAmber.copy(alpha = 0.7f),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "PRO",
+                                        color = Color(0xFF5CFF98),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        },
                         onClick = {
                             saveMenuExpanded = false
                             selectedPhotoUriString?.let { uriString ->
-                                val uri = Uri.parse(uriString)
-                                isSaving = true
-                                scope.launch {
-                                    val cachedDepthOverride =
-                                        activeDepthOverrideForQuality()
-                                            ?: DepthBlurEngine.cachedPreviewDepth?.takeIf {
-                                                DepthBlurEngine.cachedPreviewUriString == uriString
-                                                    && !DepthBlurEngine.cachedPreviewUsesInjectedDepth
-                                            }
-                                    val result = DepthBlurEngine.exportBlurredImage(
-                                        context = context,
-                                        uri = uri,
-                                        params = blurParams,
-                                        maxDimension = 2048,
-                                        overrideDepth = cachedDepthOverride,
-                                        highQualityDepth = depthQuality.usesHighQualityPath
-                                    )
-                                    isSaving = false
-                                    saveStatus = when (result) {
-                                        is DepthBlurExportResult.Success -> "High-res photo saved."
-                                        is DepthBlurExportResult.Error -> "Save failed: ${result.message}"
+                                fun doHighResSave() {
+                                    val uri = Uri.parse(uriString)
+                                    isSaving = true
+                                    scope.launch {
+                                        val cachedDepthOverride =
+                                            activeDepthOverrideForQuality()
+                                                ?: DepthBlurEngine.cachedPreviewDepth?.takeIf {
+                                                    DepthBlurEngine.cachedPreviewUriString == uriString
+                                                        && !DepthBlurEngine.cachedPreviewUsesInjectedDepth
+                                                }
+                                        val result = DepthBlurEngine.exportBlurredImage(
+                                            context = context,
+                                            uri = uri,
+                                            params = blurParams,
+                                            maxDimension = 2048,
+                                            overrideDepth = cachedDepthOverride,
+                                            highQualityDepth = depthQuality.usesHighQualityPath
+                                        )
+                                        isSaving = false
+                                        saveStatus = when (result) {
+                                            is DepthBlurExportResult.Success -> "High-res photo saved."
+                                            is DepthBlurExportResult.Error -> "Save failed: ${result.message}"
+                                        }
+                                        saveDialogVisible = true
                                     }
-                                    saveDialogVisible = true
+                                }
+                                if (isProUser) {
+                                    // Pro users save directly, no ad
+                                    doHighResSave()
+                                } else {
+                                    val activity = context as? android.app.Activity ?: return@let
+                                    com.cinedepth.pro.ui.ads.RewardedAdHelper.showForHighResSave(
+                                        activity = activity,
+                                        onRewarded = { doHighResSave() },
+                                        onNotAvailable = { doHighResSave() }
+                                    )
                                 }
                             }
                         }
                     )
+                    // Upgrade to Pro option
+                    if (!isProUser) {
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("⭐", style = MaterialTheme.typography.bodyMedium)
+                                    Spacer(Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            "Upgrade to Pro",
+                                            color = Color(0xFFFFD700),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            com.cinedepth.pro.ui.billing.ProUpgradeManager.getFormattedPrice()
+                                                ?: "$4.99",
+                                            color = Color.White.copy(alpha = 0.6f),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                            },
+                            onClick = {
+                                saveMenuExpanded = false
+                                val activity = context as? android.app.Activity ?: return@DropdownMenuItem
+                                com.cinedepth.pro.ui.billing.ProUpgradeManager.launchPurchase(activity)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -994,6 +1061,7 @@ private fun BottomControlsPanel(
                 }
             }
 
+            if (displayMode != PreviewDisplayMode.DepthMap) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth(),
@@ -1169,6 +1237,7 @@ private fun BottomControlsPanel(
                     }
                 }
             }
+            } // end if (displayMode != DepthMap)
         }
     }
 }
@@ -1548,13 +1617,24 @@ private fun RealBlurPreviewRenderer(
 ) {
     val context = LocalContext.current
     val photoUri = selectedPhotoUriString?.let(Uri::parse)
-    var baseSourceBitmap by remember(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth) {
+
+    // ─── Per-quality depth cache to avoid re-rendering on Standard↔HD switch ───
+    data class QualityCacheEntry(
+        val source: Bitmap?,
+        val rendered: Bitmap?,
+        val depth: Bitmap?
+    )
+    val qualityCache = remember(selectedPhotoUriString) {
+        mutableStateMapOf<Boolean, QualityCacheEntry>()
+    }
+
+    var baseSourceBitmap by remember(selectedPhotoUriString) {
         mutableStateOf(cachedPreviewCopy(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth, DepthBlurEngine.cachedPreviewSource))
     }
-    var renderedBitmap by remember(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth) {
+    var renderedBitmap by remember(selectedPhotoUriString) {
         mutableStateOf(cachedPreviewCopy(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth, DepthBlurEngine.cachedPreviewRendered))
     }
-    var baseDepthBitmap by remember(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth) {
+    var baseDepthBitmap by remember(selectedPhotoUriString) {
         mutableStateOf(cachedPreviewCopy(selectedPhotoUriString, highQualityDepthEnabled, useInjectedDepth, DepthBlurEngine.cachedPreviewDepth))
     }
     var renderError by remember(selectedPhotoUriString) { mutableStateOf<String?>(null) }
@@ -1564,6 +1644,7 @@ private fun RealBlurPreviewRenderer(
     var lastRenderedParams by remember(selectedPhotoUriString, depthRevision) {
         mutableStateOf<BlurPreviewParams?>(null)
     }
+    var lastRenderedQuality by remember(selectedPhotoUriString) { mutableStateOf(highQualityDepthEnabled) }
 
     // Focus ring animation state
     var focusTapPos by remember { mutableStateOf<Offset?>(null) }
@@ -1574,6 +1655,41 @@ private fun RealBlurPreviewRenderer(
     var isCompareMode by remember { mutableStateOf(false) }
     var compareSliderFraction by remember { mutableFloatStateOf(0.5f) }
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    var faceDetectedMessage by remember { mutableStateOf<String?>(null) }
+
+    // ─── Face auto-focus: detect face → sample depth → set focus ───
+    // Trigger when rendered bitmap appears (means depth is also ready)
+    var faceAutoFocusAttempted by remember(selectedPhotoUriString) { mutableStateOf(false) }
+    LaunchedEffect(renderedBitmap) {
+        if (faceAutoFocusAttempted) return@LaunchedEffect
+        val src = baseSourceBitmap ?: return@LaunchedEffect
+        val depth = baseDepthBitmap ?: return@LaunchedEffect
+        if (src.isRecycled || depth.isRecycled) return@LaunchedEffect
+        faceAutoFocusAttempted = true
+
+        android.util.Log.d("FaceAutoFocus", "Starting detection, src=${src.width}x${src.height}, depth=${depth.width}x${depth.height}")
+        try {
+            // Copy to avoid bitmap-recycled crashes during async ML Kit processing
+            val srcCopy = src.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+            val result = com.cinedepth.pro.ui.blur.FaceAutoFocus.detectAndSampleDepth(srcCopy, depth)
+            srcCopy.recycle()
+            android.util.Log.d("FaceAutoFocus", "Result: $result")
+            if (result != null) {
+                onDepthPicked(result.depthValue, Offset(result.normalizedX, result.normalizedY))
+                faceDetectedMessage = "Face detected & focused"
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("FaceAutoFocus", "Detection failed", e)
+        }
+    }
+
+    // Timer to dismiss face message
+    LaunchedEffect(faceDetectedMessage) {
+        if (faceDetectedMessage != null) {
+            kotlinx.coroutines.delay(3000)
+            faceDetectedMessage = null
+        }
+    }
 
     DisposableEffect(selectedPhotoUriString) {
         onDispose {
@@ -1614,6 +1730,43 @@ private fun RealBlurPreviewRenderer(
             renderError = null; isRendering = false
             return@LaunchedEffect
         }
+
+        // ─── Check quality cache first ───
+        val cached = qualityCache[highQualityDepthEnabled]
+        if (cached != null && lastRenderedQuality != highQualityDepthEnabled &&
+            cached.source != null && cached.rendered != null && cached.depth != null &&
+            !cached.source.isRecycled && !cached.rendered.isRecycled && !cached.depth.isRecycled
+        ) {
+            baseSourceBitmap = baseSourceBitmap.replaceWith(cached.source.copy(Bitmap.Config.ARGB_8888, false))
+            renderedBitmap = renderedBitmap.replaceWith(cached.rendered.copy(Bitmap.Config.ARGB_8888, false))
+            baseDepthBitmap = baseDepthBitmap.replaceWith(cached.depth.copy(Bitmap.Config.ARGB_8888, false))
+            lastRenderedQuality = highQualityDepthEnabled
+            lastRenderedParams = params
+            return@LaunchedEffect
+        }
+
+        // ─── Save current quality to cache before switching ───
+        if (lastRenderedQuality != highQualityDepthEnabled && renderedBitmap != null) {
+            val src = baseSourceBitmap
+            val ren = renderedBitmap
+            val dep = baseDepthBitmap
+            if (src != null && ren != null && dep != null &&
+                !src.isRecycled && !ren.isRecycled && !dep.isRecycled
+            ) {
+                // Recycle old cache entry for this quality if exists
+                qualityCache[lastRenderedQuality]?.let { old ->
+                    old.source?.takeIf { !it.isRecycled }?.recycle()
+                    old.rendered?.takeIf { !it.isRecycled }?.recycle()
+                    old.depth?.takeIf { !it.isRecycled }?.recycle()
+                }
+                qualityCache[lastRenderedQuality] = QualityCacheEntry(
+                    source = src.copy(Bitmap.Config.ARGB_8888, false),
+                    rendered = ren.copy(Bitmap.Config.ARGB_8888, false),
+                    depth = dep.copy(Bitmap.Config.ARGB_8888, false)
+                )
+            }
+        }
+
         isRendering = true
         renderError = null
         try {
@@ -1630,11 +1783,23 @@ private fun RealBlurPreviewRenderer(
                 highQualityDepth = highQualityDepthEnabled,
                 usesInjectedDepth = useInjectedDepth
             )
-            // If we already decoded the source, replace it with the one used in render
             baseSourceBitmap = baseSourceBitmap.replaceWith(result.sourceBitmap)
             renderedBitmap = renderedBitmap.replaceWith(result.bitmap)
             baseDepthBitmap = baseDepthBitmap.replaceWith(result.depthMapBitmap)
             lastRenderedParams = params
+            lastRenderedQuality = highQualityDepthEnabled
+
+            // Store in quality cache
+            qualityCache[highQualityDepthEnabled]?.let { old ->
+                old.source?.takeIf { !it.isRecycled }?.recycle()
+                old.rendered?.takeIf { !it.isRecycled }?.recycle()
+                old.depth?.takeIf { !it.isRecycled }?.recycle()
+            }
+            qualityCache[highQualityDepthEnabled] = QualityCacheEntry(
+                source = result.sourceBitmap.copy(Bitmap.Config.ARGB_8888, false),
+                rendered = result.bitmap.copy(Bitmap.Config.ARGB_8888, false),
+                depth = result.depthMapBitmap.copy(Bitmap.Config.ARGB_8888, false)
+            )
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
         } catch (t: Throwable) {
@@ -2069,6 +2234,34 @@ private fun RealBlurPreviewRenderer(
                             style = MaterialTheme.typography.labelMedium
                         )
                     }
+                }
+            }
+        }
+
+        // Face auto-focus message
+        if (faceDetectedMessage != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .zIndex(10f)
+                    .padding(top = 130.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color(0xFF1B2B1B).copy(alpha = 0.92f))
+                    .border(1.dp, Color(0xFF5CFF98).copy(alpha = 0.3f), RoundedCornerShape(999.dp))
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "\uD83D\uDC64",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        faceDetectedMessage ?: "",
+                        color = Color(0xFF5CFF98),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }

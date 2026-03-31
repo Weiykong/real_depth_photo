@@ -16,6 +16,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -86,6 +90,7 @@ fun RetouchDepthScreen(
     state: RetouchDepthUiState,
     onBack: (() -> Unit)? = null,
     onImagePointClicked: (Int, Int) -> Unit = { _, _ -> },
+    onLongPressPicked: (Int, Int) -> Unit = { _, _ -> },
     onPointerMoved: (Offset?) -> Unit = {},
     onStrokeStarted: (Offset, Color) -> Unit = { _, _ -> },
     onStrokeContinued: (Offset) -> Unit = {},
@@ -122,6 +127,7 @@ fun RetouchDepthScreen(
         DepthCanvasCard(
             state = state,
             onImagePointClicked = onImagePointClicked,
+            onLongPressPicked = onLongPressPicked,
             onPointerMoved = onPointerMoved,
             onStrokeStarted = onStrokeStarted,
             onStrokeContinued = onStrokeContinued,
@@ -279,6 +285,7 @@ fun RetouchDepthScreen(
 private fun DepthCanvasCard(
     state: RetouchDepthUiState,
     onImagePointClicked: (Int, Int) -> Unit = { _, _ -> },
+    onLongPressPicked: (Int, Int) -> Unit = { _, _ -> },
     onPointerMoved: (Offset?) -> Unit = {},
     onStrokeStarted: (Offset, Color) -> Unit = { _, _ -> },
     onStrokeContinued: (Offset) -> Unit = {},
@@ -334,39 +341,93 @@ private fun DepthCanvasCard(
                         return imageX to imageY
                     }
 
-                    if (
-                        state.mode == RetouchMode.ManualPaint ||
+                    val isDrawMode = state.mode == RetouchMode.ManualPaint ||
                         state.mode == RetouchMode.Erase ||
                         state.mode == RetouchMode.GradientBrush
-                    ) {
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                val rawPaintPos = offset.copy(y = offset.y + touchOffsetY)
-                                val mappedPos = mapToCanvasContent(rawPaintPos)
-                                onPointerMoved(rawPaintPos)
-                                onStrokeStarted(mappedPos, strokeColor)
-                            },
-                            onDrag = { change, _ ->
-                                val rawPaintPos = change.position.copy(y = change.position.y + touchOffsetY)
-                                val mappedPos = mapToCanvasContent(rawPaintPos)
-                                onPointerMoved(rawPaintPos)
-                                onStrokeContinued(mappedPos)
-                            },
-                            onDragEnd = {
-                                onPointerMoved(null)
-                                onStrokeFinished()
-                            },
-                            onDragCancel = {
-                                onPointerMoved(null)
-                                onStrokeFinished()
+
+                    if (isDrawMode) {
+                        // Draw modes: long-press = pick depth, short drag = paint stroke
+                        val longPressTimeoutMs = 350L
+                        val moveSlop = 12f
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val downPos = down.position
+                            var gestureResult = 0 // 0=undecided, 1=longPress, 2=drag, 3=releasedEarly
+
+                            try {
+                                withTimeout(longPressTimeoutMs) {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        val moved = (change.position - downPos).getDistance()
+                                        if (moved > moveSlop) {
+                                            gestureResult = 2 // drag
+                                            break
+                                        }
+                                        if (!change.pressed) {
+                                            gestureResult = 3 // released early (tap)
+                                            break
+                                        }
+                                    }
+                                }
+                            } catch (_: PointerEventTimeoutCancellationException) {
+                                gestureResult = 1 // long press
                             }
-                        )
-                    } else {
-                        detectTapGestures { offset ->
-                            mapToImagePoint(offset)?.let { (imageX, imageY) ->
-                                onImagePointClicked(imageX, imageY)
+
+                            when (gestureResult) {
+                                1 -> {
+                                    // LONG PRESS → pick depth
+                                    mapToImagePoint(downPos)?.let { (imageX, imageY) ->
+                                        onLongPressPicked(imageX, imageY)
+                                    }
+                                    // Consume remaining pointer events until release
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        change.consume()
+                                        if (!change.pressed) break
+                                    }
+                                }
+                                2 -> {
+                                    // DRAG → paint stroke
+                                    val rawStart = downPos.copy(y = downPos.y + touchOffsetY)
+                                    val mappedStart = mapToCanvasContent(rawStart)
+                                    onPointerMoved(rawStart)
+                                    onStrokeStarted(mappedStart, strokeColor)
+
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull() ?: break
+                                        if (!change.pressed) {
+                                            onPointerMoved(null)
+                                            onStrokeFinished()
+                                            break
+                                        }
+                                        val rawPos = change.position.copy(y = change.position.y + touchOffsetY)
+                                        val mappedPos = mapToCanvasContent(rawPos)
+                                        onPointerMoved(rawPos)
+                                        onStrokeContinued(mappedPos)
+                                        change.consume()
+                                    }
+                                }
+                                // 3 or 0 → released early / undecided → do nothing
                             }
                         }
+                    } else {
+                        // Tap modes (SmartSelect, Eyedropper, etc.):
+                        // Tap = normal action, long-press = pick depth
+                        detectTapGestures(
+                            onTap = { offset ->
+                                mapToImagePoint(offset)?.let { (imageX, imageY) ->
+                                    onImagePointClicked(imageX, imageY)
+                                }
+                            },
+                            onLongPress = { offset ->
+                                mapToImagePoint(offset)?.let { (imageX, imageY) ->
+                                    onLongPressPicked(imageX, imageY)
+                                }
+                            }
+                        )
                     }
                 }
         ) {
@@ -490,6 +551,7 @@ private fun DepthCanvasCard(
 }
 
 @Composable
+@Suppress("UNUSED_PARAMETER")
 private fun RetouchControls(
     state: RetouchDepthUiState,
     navBarPadding: androidx.compose.ui.unit.Dp,
@@ -595,39 +657,34 @@ private fun RetouchControls(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    "Depth ${state.targetDepth}",
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Medium
-                )
-                Spacer(Modifier.width(8.dp))
+                // Depth value + color swatch
                 val gray = state.targetDepth / 255f
                 Box(
                     modifier = Modifier
-                        .size(18.dp)
+                        .size(24.dp)
                         .clip(CircleShape)
                         .background(Color(gray, gray, gray))
-                        .border(1.dp, AccentAmber.copy(alpha = 0.5f), CircleShape)
+                        .border(1.5.dp, AccentAmber.copy(alpha = 0.6f), CircleShape)
                 )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text(
+                        "Depth ${state.targetDepth}",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "Long-press image to pick",
+                        color = Color.White.copy(alpha = 0.38f),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 Spacer(Modifier.weight(1f))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        if (state.targetPickerEnabled) "Picking…" else "Pick",
-                        color = if (state.targetPickerEnabled) AccentAmber else Color.White.copy(alpha = 0.6f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                if (state.targetPickerEnabled) AccentAmber.copy(alpha = 0.18f)
-                                else Color.White.copy(alpha = 0.08f)
-                            )
-                            .clickable { onToggleTargetPicker(!state.targetPickerEnabled) }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
                     Text(
                         "Photo",
                         color = Color.White.copy(alpha = 0.6f),
@@ -732,11 +789,7 @@ private fun RetouchControls(
                 RetouchMode.SmartSelect, RetouchMode.AutoSegment -> {
                     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(
-                            text = if (state.targetPickerEnabled) {
-                                "Tap image to sample target depth."
-                            } else {
-                                "Tap area, then confirm and fill. Use Pick to sample depth."
-                            },
+                            text = "Tap area → confirm → fill. Long-press to pick depth.",
                             color = Color.White.copy(alpha = 0.68f),
                             style = MaterialTheme.typography.labelSmall
                         )
@@ -1010,6 +1063,7 @@ fun RetouchDepthRoute(
             onBack?.invoke()
         },
         onImagePointClicked = { imageX, imageY -> viewModel.onAction(RetouchDepthAction.ImagePointClicked(imageX, imageY)) },
+        onLongPressPicked = { imageX, imageY -> viewModel.onAction(RetouchDepthAction.LongPressPicked(imageX, imageY)) },
         onPointerMoved = { viewModel.onAction(RetouchDepthAction.PointerMoved(it)) },
         onStrokeStarted = { offset, color -> viewModel.onAction(RetouchDepthAction.StrokeStarted(offset, color)) },
         onStrokeContinued = { offset -> viewModel.onAction(RetouchDepthAction.StrokeContinued(offset)) },

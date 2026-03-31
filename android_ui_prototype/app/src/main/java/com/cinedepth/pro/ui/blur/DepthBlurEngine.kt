@@ -40,6 +40,7 @@ data class DepthBlurRenderOutput(
 object DepthBlurEngine {
 
     private var cachedEstimator: DepthEstimator? = null
+    private var cachedSegmenter: PortraitSegmenter? = null
     private var injectedDepth: Bitmap? = null
     private var modifiedDepth: Bitmap? = null
     private val mainHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
@@ -106,6 +107,13 @@ object DepthBlurEngine {
             cachedEstimator = DepthEstimator(context.applicationContext)
         }
         return cachedEstimator!!
+    }
+
+    fun getSegmenter(): PortraitSegmenter {
+        if (cachedSegmenter == null) {
+            cachedSegmenter = PortraitSegmenter()
+        }
+        return cachedSegmenter!!
     }
 
     suspend fun renderPreview(
@@ -191,26 +199,41 @@ object DepthBlurEngine {
         val sourceBitmap = src
 
         val depthStart = System.nanoTime()
-        val rawDepth = if (overrideDepth != null) {
-            val scaledDepth = if (overrideDepth.width != width || overrideDepth.height != height) {
-                Bitmap.createScaledBitmap(overrideDepth, width, height, true)
+
+        // Run depth estimation and portrait segmentation in PARALLEL
+        val depthDeferred = async {
+            if (overrideDepth != null) {
+                val scaledDepth = if (overrideDepth.width != width || overrideDepth.height != height) {
+                    Bitmap.createScaledBitmap(overrideDepth, width, height, true)
+                } else {
+                    overrideDepth
+                }
+                val floatData = extractDepthFromBitmap(scaledDepth)
+                if (scaledDepth !== overrideDepth) scaledDepth.recycle()
+                floatData
+            } else if (depthEstimator != null && depthEstimator.isReady()) {
+                val raw = depthEstimator.estimateDepth(sourceBitmap)
+                if (raw != null) {
+                    resizeDepthArray(raw, DepthEstimator.INPUT_IMAGE_SIZE, DepthEstimator.INPUT_IMAGE_SIZE, width, height)
+                } else {
+                    FloatArray(width * height) { 0.5f }
+                }
             } else {
-                overrideDepth
-            }
-            val floatData = extractDepthFromBitmap(scaledDepth)
-            if (scaledDepth !== overrideDepth) scaledDepth.recycle()
-            floatData
-        } else if (depthEstimator != null && depthEstimator.isReady()) {
-            val raw = depthEstimator.estimateDepth(sourceBitmap)
-            if (raw != null) {
-                resizeDepthArray(raw, DepthEstimator.INPUT_IMAGE_SIZE, DepthEstimator.INPUT_IMAGE_SIZE, width, height)
-            } else {
-                // Return empty if estimation fails
                 FloatArray(width * height) { 0.5f }
             }
-        } else {
-            FloatArray(width * height) { 0.5f }
         }
+
+        val segDeferred = async(Dispatchers.Default) {
+            try {
+                getSegmenter().segmentToBitmap(sourceBitmap, width, height)
+            } catch (_: Exception) {
+                // Segmentation is best-effort; return neutral gray (0.5) mask
+                null
+            }
+        }
+
+        val rawDepth = depthDeferred.await()
+        val segMaskBitmap: Bitmap? = segDeferred.await()
 
         val depthInferenceMs = (System.nanoTime() - depthStart) / 1_000_000L
         val shaderStart = System.nanoTime()
@@ -239,9 +262,15 @@ object DepthBlurEngine {
             val refinePaint = android.graphics.Paint()
             refinePaint.shader = refineShader
             refinedDepthBitmap = renderShaderToBitmap(width, height, refinePaint)
+            // Create a neutral seg mask fallback (0.5 = no opinion) if segmentation failed
+            val hasSegmentation = segMaskBitmap != null
+            val effectiveSegMask = segMaskBitmap ?: createNeutralMask(width, height)
+
             val contourMatteBitmap = renderContourMatteBitmap(
                 source = sourceBitmap,
                 refinedDepthBitmap = refinedDepthBitmap,
+                segMaskBitmap = effectiveSegMask,
+                hasSegMask = hasSegmentation,
                 focus = focus,
                 focusDeadZone = focusDeadZone,
                 falloffWidth = falloffWidth,
@@ -260,11 +289,13 @@ object DepthBlurEngine {
                 fastMode = fastContourMatte
             )
 
-            // Pass 2: Bokeh Blur on GPU using Refined Depth
+            // Pass 2: Bokeh Blur on GPU using Refined Depth + Seg Mask
             val bokehShader = android.graphics.RuntimeShader(BOKEH_SHADER_SRC)
             bokehShader.setInputShader("image", android.graphics.BitmapShader(sourceBitmap, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP))
             bokehShader.setInputShader("refinedDepthMap", android.graphics.BitmapShader(refinedDepthBitmap, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP))
             bokehShader.setInputShader("contourMatte", createMappedBitmapShader(contourMatteBitmap, width, height))
+            bokehShader.setInputShader("segMask", android.graphics.BitmapShader(effectiveSegMask, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP))
+            bokehShader.setFloatUniform("hasSegMask", if (hasSegmentation) 1.0f else 0.0f)
             bokehShader.setFloatUniform("resolution", width.toFloat(), height.toFloat())
             bokehShader.setFloatUniform("focus", focus)
             bokehShader.setFloatUniform("focusDeadZone", focusDeadZone)
@@ -308,6 +339,7 @@ object DepthBlurEngine {
             
             output = renderShaderToBitmap(width, height, bokehPaint)
             contourMatteBitmap.recycle()
+            effectiveSegMask.recycle()
         } else {
             // Fallback for older devices
             output = sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
@@ -706,6 +738,8 @@ object DepthBlurEngine {
     private suspend fun renderContourMatteBitmap(
         source: Bitmap,
         refinedDepthBitmap: Bitmap,
+        segMaskBitmap: Bitmap,
+        hasSegMask: Boolean,
         focus: Float,
         focusDeadZone: Float,
         falloffWidth: Float,
@@ -738,6 +772,16 @@ object DepthBlurEngine {
         } else {
             refinedDepthBitmap
         }
+        val workSeg = if (workScale < 1f) {
+            Bitmap.createScaledBitmap(
+                segMaskBitmap,
+                workSource.width,
+                workSource.height,
+                true
+            )
+        } else {
+            segMaskBitmap
+        }
         val workWidth = workSource.width
         val workHeight = workSource.height
         try {
@@ -758,6 +802,15 @@ object DepthBlurEngine {
                     android.graphics.Shader.TileMode.CLAMP
                 )
             )
+            matteShader.setInputShader(
+                "segMask",
+                android.graphics.BitmapShader(
+                    workSeg,
+                    android.graphics.Shader.TileMode.CLAMP,
+                    android.graphics.Shader.TileMode.CLAMP
+                )
+            )
+            matteShader.setFloatUniform("hasSegMask", if (hasSegMask) 1.0f else 0.0f)
             matteShader.setFloatUniform("resolution", workWidth.toFloat(), workHeight.toFloat())
             matteShader.setFloatUniform("focus", focus)
             matteShader.setFloatUniform("focusDeadZone", focusDeadZone)
@@ -782,8 +835,18 @@ object DepthBlurEngine {
         }.also { matteBitmap ->
             if (workSource !== source) workSource.recycle()
             if (workDepth !== refinedDepthBitmap) workDepth.recycle()
+            if (workSeg !== segMaskBitmap) workSeg.recycle()
             return@withContext matteBitmap
         }
+    }
+
+    private fun createNeutralMask(width: Int, height: Int): Bitmap {
+        // Neutral mask: 0.0 everywhere (no person detected)
+        val pixels = IntArray(width * height)
+        val v = 0
+        val pixel = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        pixels.fill(pixel)
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
     }
 
     private fun smoothstep(edge0: Float, edge1: Float, x: Float): Float {

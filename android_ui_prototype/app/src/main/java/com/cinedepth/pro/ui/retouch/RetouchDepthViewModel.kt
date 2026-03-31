@@ -48,6 +48,7 @@ sealed interface RetouchDepthAction {
     data object AutoSegmentDetectRequested : RetouchDepthAction
     
     data class ImagePointClicked(val imageX: Int, val imageY: Int) : RetouchDepthAction
+    data class LongPressPicked(val imageX: Int, val imageY: Int) : RetouchDepthAction
     data class StrokeStarted(val point: Offset, val color: Color) : RetouchDepthAction
     data class StrokeContinued(val point: Offset) : RetouchDepthAction
     data object StrokeFinished : RetouchDepthAction
@@ -137,6 +138,9 @@ class RetouchDepthViewModel : ViewModel() {
             }
             is RetouchDepthAction.ImagePointClicked -> {
                 handleImagePointClick(action.imageX, action.imageY)
+            }
+            is RetouchDepthAction.LongPressPicked -> {
+                handleLongPressPick(action.imageX, action.imageY)
             }
             is RetouchDepthAction.PointerMoved -> {
                 updateState { it.copy(lastTouchPoint = action.point) }
@@ -463,6 +467,29 @@ class RetouchDepthViewModel : ViewModel() {
             updateState { it.copy(targetDepth = targetDepthInt) }
         }
 
+        releaseInteractiveDepthBitmapIfNeeded(depthBitmap, state)
+    }
+
+    /**
+     * Long-press pick: instantly samples depth at the touch point
+     * without needing to toggle any picker mode. Works in ALL modes.
+     */
+    private fun handleLongPressPick(imageX: Int, imageY: Int) {
+        val state = _uiState.value
+        val depthBitmap = buildInteractiveDepthBitmap(state) ?: return
+        val imgX = imageX.coerceIn(0, depthBitmap.width - 1)
+        val imgY = imageY.coerceIn(0, depthBitmap.height - 1)
+
+        val pixel = depthBitmap.getPixel(imgX, imgY)
+        val sampledDepth = android.graphics.Color.red(pixel)
+        updateState {
+            it.copy(
+                targetDepth = sampledDepth,
+                targetDepthConfirmed = false,
+                targetPickerEnabled = false,
+                canvasStatus = "Depth picked: $sampledDepth"
+            )
+        }
         releaseInteractiveDepthBitmapIfNeeded(depthBitmap, state)
     }
 

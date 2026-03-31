@@ -10,6 +10,12 @@
 
 ## 🖼️ Sample Results
 
+### Side-by-Side Comparison
+
+![Original vs CineDepth Pro](docs/assets/sample1_side_by_side_montage.jpg)
+
+> *A framed comparison montage highlighting the source capture beside the final CineDepth Pro render.*
+
 ### High-Resolution Scene Analysis
 | Original Photo | AI Depth Estimation (HD) | Final 4K GPU Render |
 |:---:|:---:|:---:|

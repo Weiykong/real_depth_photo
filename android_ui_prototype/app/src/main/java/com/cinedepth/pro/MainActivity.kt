@@ -11,6 +11,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        com.cinedepth.pro.ui.ads.RewardedAdHelper.initialize(this)
+        com.cinedepth.pro.ui.billing.ProUpgradeManager.initialize(this)
         setContent {
             CineDepthTheme {
                 CineDepthApp()

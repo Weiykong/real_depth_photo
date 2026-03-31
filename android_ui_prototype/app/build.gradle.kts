@@ -79,6 +79,18 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
+    // ML Kit Selfie Segmentation for hair/portrait matting
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+
+    // ML Kit Face Detection for auto-focus
+    implementation("com.google.mlkit:face-detection:16.1.7")
+
+    // AdMob for rewarded ads (high-res save)
+    implementation("com.google.android.gms:play-services-ads:23.6.0")
+
+    // Google Play Billing for Pro upgrade
+    implementation("com.android.billingclient:billing-ktx:7.1.1")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
